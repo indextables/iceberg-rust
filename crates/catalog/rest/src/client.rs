@@ -105,7 +105,9 @@ impl HttpClient {
     /// Update the http client with new configuration.
     ///
     /// If cfg carries new value, we will use cfg instead.
-    /// Otherwise, we will keep the old value.
+    /// Otherwise, we will keep the old value. The response limit
+    /// (`rest.response-max-bytes`) is the exception: the new configuration
+    /// can lower it but never raise or remove it.
     pub(crate) fn update_with(self, cfg: &RestCatalogConfig) -> Result<Self> {
         let extra_headers = (!cfg.extra_headers()?.is_empty())
             .then(|| cfg.extra_headers())
@@ -116,7 +118,11 @@ impl HttpClient {
             client: cfg.client(),
             extra_headers,
             disable_header_redaction: cfg.disable_header_redaction(),
-            response_max_bytes: cfg.response_max_bytes()?,
+            // The user's limit is a ceiling the server's configuration can only lower.
+            response_max_bytes: match (self.response_max_bytes, cfg.response_max_bytes()?) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
         })
     }
 
@@ -259,6 +265,38 @@ pub(crate) fn deserialize_unexpected_catalog_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_update_with_never_raises_the_response_limit() {
+        let user = RestCatalogConfig::builder()
+            .uri("http://localhost".to_string())
+            .props(HashMap::from([(
+                crate::REST_CATALOG_PROP_RESPONSE_MAX_BYTES.to_string(),
+                "100".to_string(),
+            )]))
+            .build();
+        let client = HttpClient::new(&user).unwrap();
+        let raised = RestCatalogConfig::builder()
+            .uri("http://localhost".to_string())
+            .props(HashMap::from([(
+                crate::REST_CATALOG_PROP_RESPONSE_MAX_BYTES.to_string(),
+                "1000000".to_string(),
+            )]))
+            .build();
+        let client = client.update_with(&raised).unwrap();
+        assert_eq!(client.response_max_bytes, Some(100));
+        let none = RestCatalogConfig::builder().uri("http://localhost".to_string()).build();
+        let client = client.update_with(&none).unwrap();
+        assert_eq!(client.response_max_bytes, Some(100));
+        let lowered = RestCatalogConfig::builder()
+            .uri("http://localhost".to_string())
+            .props(HashMap::from([(
+                crate::REST_CATALOG_PROP_RESPONSE_MAX_BYTES.to_string(),
+                "10".to_string(),
+            )]))
+            .build();
+        assert_eq!(client.update_with(&lowered).unwrap().response_max_bytes, Some(10));
+    }
 
     #[tokio::test]
     async fn test_a_truncated_body_error_names_the_url() {
