@@ -959,13 +959,13 @@ pub(super) mod _serde {
             } else {
                 value.current_snapshot_id
             };
-            let schemas = HashMap::from_iter(
+            let schemas = index_unique(
+                "schema",
                 value
                     .schemas
                     .into_iter()
-                    .map(|schema| Ok((schema.schema_id, Arc::new(schema.try_into()?))))
-                    .collect::<Result<Vec<_>, Error>>()?,
-            );
+                    .map(|schema| Ok((schema.schema_id, Arc::new(schema.try_into()?)))),
+            )?;
 
             let current_schema: &SchemaRef =
                 schemas.get(&value.current_schema_id).ok_or_else(|| {
@@ -974,12 +974,13 @@ pub(super) mod _serde {
                         value.current_schema_id
                     )
                 })?;
-            let partition_specs = HashMap::from_iter(
+            let partition_specs = index_unique(
+                "partition spec",
                 value
                     .partition_specs
                     .into_iter()
-                    .map(|x| (x.spec_id(), Arc::new(x))),
-            );
+                    .map(|x| Ok((x.spec_id(), Arc::new(x)))),
+            )?;
             let default_spec_id = value.default_spec_id;
             let default_spec: PartitionSpecRef = partition_specs
                 .get(&value.default_spec_id)
@@ -1009,21 +1010,24 @@ pub(super) mod _serde {
                 current_snapshot_id,
                 snapshots: snapshots
                     .map(|snapshots| {
-                        HashMap::from_iter(
+                        index_unique(
+                            "snapshot",
                             snapshots
                                 .into_iter()
-                                .map(|x| (x.snapshot_id, Arc::new(x.into()))),
+                                .map(|x| Ok((x.snapshot_id, Arc::new(x.into())))),
                         )
                     })
+                    .transpose()?
                     .unwrap_or_default(),
                 snapshot_log: value.snapshot_log.unwrap_or_default(),
                 metadata_log: value.metadata_log.unwrap_or_default(),
-                sort_orders: HashMap::from_iter(
+                sort_orders: index_unique(
+                    "sort order",
                     value
                         .sort_orders
                         .into_iter()
-                        .map(|x| (x.order_id, Arc::new(x))),
-                ),
+                        .map(|x| Ok((x.order_id, Arc::new(x)))),
+                )?,
                 default_sort_order_id: value.default_sort_order_id,
                 refs: value.refs.unwrap_or_else(|| {
                     if let Some(snapshot_id) = current_snapshot_id {
@@ -1043,8 +1047,12 @@ pub(super) mod _serde {
                 partition_statistics: index_partition_statistics(value.partition_statistics),
                 encryption_keys: encryption_keys
                     .map(|keys| {
-                        HashMap::from_iter(keys.into_iter().map(|key| (key.key_id.clone(), key)))
+                        index_unique(
+                            "encryption key",
+                            keys.into_iter().map(|key| Ok((key.key_id.clone(), key))),
+                        )
                     })
+                    .transpose()?
                     .unwrap_or_default(),
                 next_row_id,
             };
@@ -1064,13 +1072,13 @@ pub(super) mod _serde {
             } else {
                 value.current_snapshot_id
             };
-            let schemas = HashMap::from_iter(
+            let schemas = index_unique(
+                "schema",
                 value
                     .schemas
                     .into_iter()
-                    .map(|schema| Ok((schema.schema_id, Arc::new(schema.try_into()?))))
-                    .collect::<Result<Vec<_>, Error>>()?,
-            );
+                    .map(|schema| Ok((schema.schema_id, Arc::new(schema.try_into()?)))),
+            )?;
 
             let current_schema: &SchemaRef =
                 schemas.get(&value.current_schema_id).ok_or_else(|| {
@@ -1079,12 +1087,13 @@ pub(super) mod _serde {
                         value.current_schema_id
                     )
                 })?;
-            let partition_specs = HashMap::from_iter(
+            let partition_specs = index_unique(
+                "partition spec",
                 value
                     .partition_specs
                     .into_iter()
-                    .map(|x| (x.spec_id(), Arc::new(x))),
-            );
+                    .map(|x| Ok((x.spec_id(), Arc::new(x)))),
+            )?;
             let default_spec_id = value.default_spec_id;
             let default_spec: PartitionSpecRef = partition_specs
                 .get(&value.default_spec_id)
@@ -1114,21 +1123,24 @@ pub(super) mod _serde {
                 current_snapshot_id,
                 snapshots: snapshots
                     .map(|snapshots| {
-                        HashMap::from_iter(
+                        index_unique(
+                            "snapshot",
                             snapshots
                                 .into_iter()
-                                .map(|x| (x.snapshot_id, Arc::new(x.into()))),
+                                .map(|x| Ok((x.snapshot_id, Arc::new(x.into())))),
                         )
                     })
+                    .transpose()?
                     .unwrap_or_default(),
                 snapshot_log: value.snapshot_log.unwrap_or_default(),
                 metadata_log: value.metadata_log.unwrap_or_default(),
-                sort_orders: HashMap::from_iter(
+                sort_orders: index_unique(
+                    "sort order",
                     value
                         .sort_orders
                         .into_iter()
-                        .map(|x| (x.order_id, Arc::new(x))),
-                ),
+                        .map(|x| Ok((x.order_id, Arc::new(x)))),
+                )?,
                 default_sort_order_id: value.default_sort_order_id,
                 refs: value.refs.unwrap_or_else(|| {
                     if let Some(snapshot_id) = current_snapshot_id {
@@ -1169,16 +1181,13 @@ pub(super) mod _serde {
                     (&value.schemas, value.current_schema_id)
                 {
                     // Option 1: Use 'schemas' + 'current_schema_id'
-                    let schema_map = HashMap::from_iter(
-                        schemas_vec
-                            .clone()
-                            .into_iter()
-                            .map(|schema| {
-                                let schema: Schema = schema.try_into()?;
-                                Ok((schema.schema_id(), Arc::new(schema)))
-                            })
-                            .collect::<Result<Vec<_>, Error>>()?,
-                    );
+                    let schema_map = index_unique(
+                        "schema",
+                        schemas_vec.clone().into_iter().map(|schema| {
+                            let schema: Schema = schema.try_into()?;
+                            Ok((schema.schema_id(), Arc::new(schema)))
+                        }),
+                    )?;
 
                     let schema = schema_map
                         .get(&schema_id)
@@ -1206,10 +1215,12 @@ pub(super) mod _serde {
             // Prioritize 'partition_specs' over 'partition_spec'
             let partition_specs = if let Some(specs_vec) = value.partition_specs {
                 // Option 1: Use 'partition_specs'
-                specs_vec
-                    .into_iter()
-                    .map(|x| (x.spec_id(), Arc::new(x)))
-                    .collect::<HashMap<_, _>>()
+                index_unique(
+                    "partition spec",
+                    specs_vec
+                        .into_iter()
+                        .map(|x| Ok((x.spec_id(), Arc::new(x)))),
+                )?
             } else if let Some(partition_spec) = value.partition_spec {
                 // Option 2: Fall back to 'partition_spec'
                 let spec = UnboundPartitionSpec {
@@ -1264,21 +1275,24 @@ pub(super) mod _serde {
                 snapshots: value
                     .snapshots
                     .map(|snapshots| {
-                        Ok::<_, Error>(HashMap::from_iter(
+                        index_unique(
+                            "snapshot",
                             snapshots
                                 .into_iter()
-                                .map(|x| Ok((x.snapshot_id, Arc::new(x.try_into()?))))
-                                .collect::<Result<Vec<_>, Error>>()?,
-                        ))
+                                .map(|x| Ok((x.snapshot_id, Arc::new(x.try_into()?)))),
+                        )
                     })
                     .transpose()?
                     .unwrap_or_default(),
                 snapshot_log: value.snapshot_log.unwrap_or_default(),
                 metadata_log: value.metadata_log.unwrap_or_default(),
                 sort_orders: match value.sort_orders {
-                    Some(sort_orders) => HashMap::from_iter(
-                        sort_orders.into_iter().map(|x| (x.order_id, Arc::new(x))),
-                    ),
+                    Some(sort_orders) => index_unique(
+                        "sort order",
+                        sort_orders
+                            .into_iter()
+                            .map(|x| Ok((x.order_id, Arc::new(x)))),
+                    )?,
                     None => HashMap::new(),
                 },
                 default_sort_order_id: value
@@ -1494,22 +1508,59 @@ pub(super) mod _serde {
         }
     }
 
+    /// Indexes `entries` by id, refusing an id that repeats: the spec requires the ids of
+    /// schemas, partition specs, sort orders, snapshots, encryption keys and view versions to be
+    /// unique, and a
+    /// repeated entry would otherwise be overwritten silently, leaving a map sized for every
+    /// repetition behind. Each entry is converted only once the ids before it are known to be
+    /// unique.
+    pub(crate) fn index_unique<K, V>(
+        what: &str,
+        entries: impl IntoIterator<Item = Result<(K, V), Error>>,
+    ) -> Result<HashMap<K, V>, Error>
+    where
+        K: std::hash::Hash + Eq + std::fmt::Display,
+    {
+        let mut map = HashMap::new();
+        for entry in entries {
+            let (id, value) = entry?;
+            match map.entry(id) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    return Err(invalid_data!(
+                        "Invalid metadata: duplicate {what} id {}",
+                        e.key()
+                    ));
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(value);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    /// Statistics files by snapshot id; for a repeated snapshot id the first file is kept. The
+    /// map is shrunk to its entries, so repetitions leave no capacity behind.
     fn index_statistics(statistics: Vec<StatisticsFile>) -> HashMap<i64, StatisticsFile> {
-        statistics
+        let mut map: HashMap<_, _> = statistics
             .into_iter()
             .rev()
             .map(|s| (s.snapshot_id, s))
-            .collect()
+            .collect();
+        map.shrink_to_fit();
+        map
     }
 
     fn index_partition_statistics(
         statistics: Vec<PartitionStatisticsFile>,
     ) -> HashMap<i64, PartitionStatisticsFile> {
-        statistics
+        let mut map: HashMap<_, _> = statistics
             .into_iter()
             .rev()
             .map(|s| (s.snapshot_id, s))
-            .collect()
+            .collect();
+        map.shrink_to_fit();
+        map
     }
 }
 
@@ -4492,5 +4543,119 @@ mod tests {
             .map(|field| field.name.as_str())
             .collect();
         assert_eq!(names, vec!["y", "z"]);
+    }
+
+    /// `file`'s JSON with `key` replaced by `f` applied to its current value.
+    fn metadata_with(
+        file: &str,
+        key: &str,
+        f: impl FnOnce(&serde_json::Value) -> serde_json::Value,
+    ) -> String {
+        let text = fs::read_to_string(format!("testdata/table_metadata/{file}")).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        json[key] = f(&json[key]);
+        json.to_string()
+    }
+
+    /// The array `v` with its first element repeated `n` more times.
+    fn repeat_first(v: &serde_json::Value, n: usize) -> serde_json::Value {
+        let mut items = v.as_array().unwrap().clone();
+        let first = items[0].clone();
+        items.extend(std::iter::repeat_n(first, n));
+        serde_json::Value::Array(items)
+    }
+
+    #[test]
+    fn test_metadata_repeating_an_id_is_refused() {
+        for (file, key, what) in [
+            ("TableMetadataV2Valid.json", "schemas", "schema"),
+            (
+                "TableMetadataV2Valid.json",
+                "partition-specs",
+                "partition spec",
+            ),
+            ("TableMetadataV2Valid.json", "sort-orders", "sort order"),
+            ("TableMetadataV2Valid.json", "snapshots", "snapshot"),
+            ("TableMetadataV3ValidEncryption.json", "schemas", "schema"),
+            (
+                "TableMetadataV3ValidEncryption.json",
+                "partition-specs",
+                "partition spec",
+            ),
+            (
+                "TableMetadataV3ValidEncryption.json",
+                "sort-orders",
+                "sort order",
+            ),
+            (
+                "TableMetadataV3ValidEncryption.json",
+                "snapshots",
+                "snapshot",
+            ),
+            (
+                "TableMetadataV3ValidEncryption.json",
+                "encryption-keys",
+                "encryption key",
+            ),
+        ] {
+            let json = metadata_with(file, key, |v| repeat_first(v, 1));
+            let err = serde_json::from_str::<TableMetadata>(&json).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("duplicate {what} id")),
+                "{file} {key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_v1_metadata_repeating_an_id_is_refused() {
+        let v2 = serde_json::from_str::<serde_json::Value>(
+            &fs::read_to_string("testdata/table_metadata/TableMetadataV2Valid.json").unwrap(),
+        )
+        .unwrap();
+        for (key, what) in [
+            ("schemas", "schema"),
+            ("partition-specs", "partition spec"),
+            ("sort-orders", "sort order"),
+            ("snapshots", "snapshot"),
+        ] {
+            let json = metadata_with("TableMetadataV1Valid.json", key, |_| {
+                let mut value = repeat_first(&v2[key], 1);
+                if key == "snapshots" {
+                    for s in value.as_array_mut().unwrap() {
+                        s.as_object_mut().unwrap().remove("sequence-number");
+                    }
+                }
+                value
+            });
+            let mut json: serde_json::Value = serde_json::from_str(&json).unwrap();
+            json["current-schema-id"] = v2["schemas"][0]["schema-id"].clone();
+            let err = serde_json::from_value::<TableMetadata>(json).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("duplicate {what} id")),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_repeated_statistics_keep_the_first_and_no_spare_capacity() {
+        let json = metadata_with("TableMetadataV2Valid.json", "statistics", |_| {
+            let file = |path: &str| serde_json::json!({"snapshot-id": 3055729675574597004i64, "statistics-path": path, "file-size-in-bytes": 1, "file-footer-size-in-bytes": 1, "blob-metadata": []});
+            let mut files = vec![file("s3://a/first.puffin")];
+            files.extend((0..10_000).map(|_| file("s3://a/later.puffin")));
+            serde_json::Value::Array(files)
+        });
+        let metadata: TableMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(metadata.statistics.len(), 1);
+        assert_eq!(
+            metadata.statistics.values().next().unwrap().statistics_path,
+            "s3://a/first.puffin"
+        );
+        assert!(
+            metadata.statistics.capacity() < 16,
+            "{}",
+            metadata.statistics.capacity()
+        );
     }
 }

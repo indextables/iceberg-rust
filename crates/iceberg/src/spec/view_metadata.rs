@@ -245,7 +245,7 @@ pub(super) mod _serde {
     use super::{ViewFormatVersion, ViewVersionId, ViewVersionLog};
     use crate::Error;
     use crate::spec::schema::_serde::SchemaV2;
-    use crate::spec::table_metadata::_serde::VersionNumber;
+    use crate::spec::table_metadata::_serde::{VersionNumber, index_unique};
     use crate::spec::view_version::_serde::ViewVersionV1;
     use crate::spec::{ViewMetadata, ViewVersion};
 
@@ -301,20 +301,20 @@ pub(super) mod _serde {
     impl TryFrom<ViewMetadataV1> for ViewMetadata {
         type Error = Error;
         fn try_from(value: ViewMetadataV1) -> Result<Self, Error> {
-            let schemas = HashMap::from_iter(
+            let schemas = index_unique(
+                "schema",
                 value
                     .schemas
                     .into_iter()
-                    .map(|schema| Ok((schema.schema_id, Arc::new(schema.try_into()?))))
-                    .collect::<Result<Vec<_>, Error>>()?,
-            );
-            let versions = HashMap::from_iter(
+                    .map(|schema| Ok((schema.schema_id, Arc::new(schema.try_into()?)))),
+            )?;
+            let versions = index_unique(
+                "view version",
                 value
                     .versions
                     .into_iter()
-                    .map(|x| Ok((x.version_id, Arc::new(ViewVersion::from(x)))))
-                    .collect::<Result<Vec<_>, Error>>()?,
-            );
+                    .map(|x| Ok((x.version_id, Arc::new(ViewVersion::from(x))))),
+            )?;
 
             let view_metadata = ViewMetadata {
                 format_version: ViewFormatVersion::V1,
@@ -702,5 +702,20 @@ pub(crate) mod tests {
             desered.unwrap_err().to_string(),
             "data did not match any variant of untagged enum ViewMetadataEnum"
         )
+    }
+
+    #[test]
+    fn test_view_metadata_repeating_an_id_is_refused() {
+        let text = fs::read_to_string("testdata/view_metadata/ViewMetadataV1Valid.json").unwrap();
+        for (key, what) in [("schemas", "schema"), ("versions", "view version")] {
+            let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let first = json[key][0].clone();
+            json[key].as_array_mut().unwrap().push(first);
+            let err = serde_json::from_value::<ViewMetadata>(json).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("duplicate {what} id")),
+                "{key}: {err}"
+            );
+        }
     }
 }
