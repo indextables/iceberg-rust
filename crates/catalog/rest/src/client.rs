@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use iceberg::{Error, ErrorKind, Result};
 use reqwest::header::HeaderMap;
@@ -26,7 +27,7 @@ use serde::de::DeserializeOwned;
 use crate::RestCatalogConfig;
 use crate::auth::AuthSession;
 use crate::request::HttpRequest;
-use crate::response::HttpResponse;
+use crate::response::{HttpResponse, ResponseInspector};
 
 /// The catalog's HTTP client, handed to an [`AuthManager`] so its own
 /// requests share the catalog's connection pool and configuration.
@@ -43,6 +44,8 @@ pub struct HttpClient {
     /// The most bytes a response body may hold (`rest.response-max-bytes`); a longer body fails
     /// before it is buffered beyond this many bytes.
     response_max_bytes: Option<u64>,
+    /// Inspects each buffered response before it is decoded.
+    response_inspector: Option<Arc<dyn ResponseInspector>>,
 }
 
 impl Debug for HttpClient {
@@ -88,8 +91,25 @@ impl HttpClient {
             reqwest::header::HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
 
-        let response = self.client.execute(request.into_inner()).await?;
-        HttpResponse::read(response, self.response_max_bytes).await
+        let request = request.into_inner();
+        let (method, url) = (request.method().clone(), request.url().clone());
+        let response = self.client.execute(request).await?;
+        self.read(&method, &url, response).await
+    }
+
+    /// Buffers `response` to a `method` request for `url` under the response
+    /// limit, then hands it to the response inspector, if any.
+    async fn read(
+        &self,
+        method: &Method,
+        url: &reqwest::Url,
+        response: reqwest::Response,
+    ) -> Result<HttpResponse> {
+        let response = HttpResponse::read(response, self.response_max_bytes).await?;
+        if let Some(inspector) = &self.response_inspector {
+            inspector.inspect(method, url, &response).await?;
+        }
+        Ok(response)
     }
 
     /// Create a new http client.
@@ -99,6 +119,7 @@ impl HttpClient {
             extra_headers: cfg.extra_headers()?,
             disable_header_redaction: cfg.disable_header_redaction(),
             response_max_bytes: cfg.response_max_bytes()?,
+            response_inspector: cfg.response_inspector(),
         })
     }
 
@@ -123,6 +144,8 @@ impl HttpClient {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             },
+            // Set by the caller only, never by the server's configuration.
+            response_inspector: self.response_inspector,
         })
     }
 
@@ -168,7 +191,15 @@ impl HttpClient {
 
         let mut request = request.into_inner();
         request.headers_mut().extend(self.extra_headers.clone());
-        HttpResponse::read(self.client.execute(request).await?, self.response_max_bytes).await
+        let (method, url) = (request.method().clone(), request.url().clone());
+        let response = self.client.execute(request).await?;
+        self.read(&method, &url, response).await
+    }
+
+    /// Testing only: whether a response inspector is set.
+    #[cfg(test)]
+    pub(crate) fn has_response_inspector(&self) -> bool {
+        self.response_inspector.is_some()
     }
 
     /// Returns whether header redaction is disabled for this client.
@@ -285,7 +316,9 @@ mod tests {
             .build();
         let client = client.update_with(&raised).unwrap();
         assert_eq!(client.response_max_bytes, Some(100));
-        let none = RestCatalogConfig::builder().uri("http://localhost".to_string()).build();
+        let none = RestCatalogConfig::builder()
+            .uri("http://localhost".to_string())
+            .build();
         let client = client.update_with(&none).unwrap();
         assert_eq!(client.response_max_bytes, Some(100));
         let lowered = RestCatalogConfig::builder()
@@ -295,7 +328,10 @@ mod tests {
                 "10".to_string(),
             )]))
             .build();
-        assert_eq!(client.update_with(&lowered).unwrap().response_max_bytes, Some(10));
+        assert_eq!(
+            client.update_with(&lowered).unwrap().response_max_bytes,
+            Some(10)
+        );
     }
 
     #[tokio::test]

@@ -52,7 +52,7 @@ use crate::client::{
 };
 use crate::endpoint::{Endpoint, V1_NAMESPACE_EXISTS, V1_TABLE_EXISTS};
 use crate::request::HttpRequest;
-use crate::response::HttpResponse;
+use crate::response::{HttpResponse, ResponseInspector};
 use crate::types::{
     CatalogConfig, CommitTableRequest, CommitTableResponse, CreateNamespaceRequest,
     CreateTableRequest, ListNamespaceResponse, ListTablesResponse, LoadTableResult,
@@ -165,6 +165,13 @@ impl RestCatalogBuilder {
         self
     }
 
+    /// Hands each buffered response to `inspector` before it is decoded; see
+    /// [`RestSessionCatalogBuilder::with_response_inspector`].
+    pub fn with_response_inspector(mut self, inspector: Arc<dyn ResponseInspector>) -> Self {
+        self.inner = self.inner.with_response_inspector(inspector);
+        self
+    }
+
     /// Binds the session context forwarded with every catalog operation.
     ///
     /// If this is not called, [`load`](CatalogBuilder::load) creates a fresh
@@ -201,6 +208,10 @@ pub(crate) struct RestCatalogConfig {
 
     #[builder(default)]
     client: Option<Client>,
+
+    /// Inspects each buffered response before it is decoded.
+    #[builder(default)]
+    response_inspector: Option<Arc<dyn ResponseInspector>>,
 
     /// Lazily-created default HTTP client, shared through clones of this
     /// config so OAuth and catalog traffic reuse one connection pool
@@ -352,10 +363,12 @@ impl RestCatalogConfig {
         oauth_params_from_props(&self.props)
     }
 
-    /// Check if header redaction is disabled in error logs.
-    ///
-    /// Returns true if the `disable-header-redaction` property is set to "true".
-    /// Defaults to false for security (headers are redacted by default).
+    /// The inspector each buffered response is handed to, if any.
+    pub(crate) fn response_inspector(&self) -> Option<Arc<dyn ResponseInspector>> {
+        self.response_inspector.clone()
+    }
+
+    /// The most bytes a response body may hold (`rest.response-max-bytes`), if set.
     pub(crate) fn response_max_bytes(&self) -> Result<Option<u64>> {
         self.props
             .get(REST_CATALOG_PROP_RESPONSE_MAX_BYTES)
@@ -370,6 +383,10 @@ impl RestCatalogConfig {
             .transpose()
     }
 
+    /// Check if header redaction is disabled in error logs.
+    ///
+    /// Returns true if the `disable-header-redaction` property is set to "true".
+    /// Defaults to false for security (headers are redacted by default).
     pub(crate) fn disable_header_redaction(&self) -> bool {
         self.props
             .get(REST_CATALOG_PROP_DISABLE_HEADER_REDACTION)
@@ -1751,6 +1768,7 @@ impl Default for RestSessionCatalogBuilder {
                 warehouse: None,
                 props: HashMap::new(),
                 client: None,
+                response_inspector: None,
                 default_client: Arc::new(OnceLock::new()),
             },
             auth_manager: None,
@@ -1780,6 +1798,14 @@ impl RestSessionCatalogBuilder {
     /// Configures the catalog with a custom HTTP client.
     pub fn with_client(mut self, client: Client) -> Self {
         self.config.client = Some(client);
+        self
+    }
+
+    /// Hands each catalog response, once its body is buffered (under
+    /// [`REST_CATALOG_PROP_RESPONSE_MAX_BYTES`]) and before it is decoded, to
+    /// `inspector`; see [`ResponseInspector`].
+    pub fn with_response_inspector(mut self, inspector: Arc<dyn ResponseInspector>) -> Self {
+        self.config.response_inspector = Some(inspector);
         self
     }
 
@@ -4412,6 +4438,138 @@ mod tests {
 
         config_mock.assert_async().await;
         rename_table_mock.assert_async().await;
+    }
+
+    /// Records each inspected response as (method, path, body length), and
+    /// refuses one whose body is longer than `refuse_above`.
+    #[derive(Debug, Default)]
+    struct RecordingInspector {
+        seen: Mutex<Vec<(String, String, usize)>>,
+        refuse_above: Option<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ResponseInspector for RecordingInspector {
+        async fn inspect(&self, method: &Method, url: &Url, response: &HttpResponse) -> Result<()> {
+            let len = response.body().len();
+            self.seen
+                .lock()
+                .unwrap()
+                .push((method.to_string(), url.path().to_string(), len));
+            match self.refuse_above {
+                Some(limit) if len > limit => Err(Error::new(
+                    ErrorKind::Unexpected,
+                    format!("inspector refused {len} bytes"),
+                )),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_response_inspector_sees_each_buffered_response() {
+        let mut server = Server::new_async().await;
+        let _config_mock = create_config_mock(&mut server).await;
+        let path = format!(
+            "{}/testdata/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            "load_table_response.json"
+        );
+        let body_len = std::fs::metadata(&path).unwrap().len() as usize;
+        let _load_mock = server
+            .mock("GET", "/v1/namespaces/ns1/tables/test1")
+            .with_status(200)
+            .with_body_from_file(&path)
+            .create_async()
+            .await;
+        let inspector = Arc::new(RecordingInspector::default());
+        let catalog = session_catalog(
+            RestCatalogConfig::builder()
+                .uri(server.url())
+                .response_inspector(Some(inspector.clone() as Arc<dyn ResponseInspector>))
+                .build(),
+        );
+        catalog
+            .load_table(
+                &SessionContext::empty(),
+                &TableIdent::new(NamespaceIdent::new("ns1".to_string()), "test1".to_string()),
+            )
+            .await
+            .unwrap();
+        let seen = inspector.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].1, "/v1/config");
+        assert_eq!(
+            seen[1],
+            (
+                "GET".to_string(),
+                "/v1/namespaces/ns1/tables/test1".to_string(),
+                body_len
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_inspector_error_fails_the_request_before_decoding() {
+        let mut server = Server::new_async().await;
+        let _config_mock = create_config_mock(&mut server).await;
+        let _load_mock = server
+            .mock("GET", "/v1/namespaces/ns1/tables/test1")
+            .with_status(200)
+            .with_body("not json, never decoded ".repeat(20))
+            .create_async()
+            .await;
+        let inspector = Arc::new(RecordingInspector {
+            // Above the configuration reply, below the table load reply.
+            refuse_above: Some(200),
+            ..Default::default()
+        });
+        let catalog = session_catalog(
+            RestCatalogConfig::builder()
+                .uri(server.url())
+                .response_inspector(Some(inspector as Arc<dyn ResponseInspector>))
+                .build(),
+        );
+        let err = catalog
+            .load_table(
+                &SessionContext::empty(),
+                &TableIdent::new(NamespaceIdent::new("ns1".to_string()), "test1".to_string()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("inspector refused 480 bytes"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_inspector_survives_the_server_configuration() {
+        let inspector: Arc<dyn ResponseInspector> = Arc::new(RecordingInspector::default());
+        let config = RestCatalogConfig::builder()
+            .uri("http://localhost".to_string())
+            .response_inspector(Some(inspector))
+            .build();
+        let client = HttpClient::new(&config).unwrap();
+        let merged = config.clone().merge_with_config(CatalogConfig {
+            defaults: HashMap::new(),
+            overrides: HashMap::new(),
+            endpoints: None,
+        });
+        assert!(
+            client
+                .update_with(&merged)
+                .unwrap()
+                .has_response_inspector()
+        );
+        assert!(
+            RestCatalogBuilder::default()
+                .with_response_inspector(Arc::new(RecordingInspector::default()))
+                .inner
+                .config
+                .response_inspector()
+                .is_some()
+        );
     }
 
     #[tokio::test]

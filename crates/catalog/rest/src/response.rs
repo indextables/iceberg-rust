@@ -19,11 +19,29 @@
 
 use std::fmt::{Debug, Formatter};
 
+use async_trait::async_trait;
 use http::{HeaderMap, StatusCode};
 use iceberg::Result;
-use reqwest::Response;
+use reqwest::{Method, Response, Url};
 
 use crate::client::format_headers_redacted;
+
+/// Inspects each response a catalog request receives, after its body is
+/// buffered and before the catalog decodes it.
+///
+/// Set with [`RestCatalogBuilder::with_response_inspector`]. A caller can use
+/// it to account for what decoding a response takes, which only the buffered
+/// body tells (a table-load response's length bounds every collection decoded
+/// from it), or to refuse a response before it is decoded: an error fails the
+/// request with that error.
+///
+/// [`RestCatalogBuilder::with_response_inspector`]: crate::RestCatalogBuilder::with_response_inspector
+#[async_trait]
+pub trait ResponseInspector: Debug + Send + Sync {
+    /// Called once per response to a `method` request for `url`, with its
+    /// status, headers and buffered body.
+    async fn inspect(&self, method: &Method, url: &Url, response: &HttpResponse) -> Result<()>;
+}
 
 /// A REST catalog response, read into memory.
 ///
@@ -136,15 +154,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_within_the_limit_keeps_the_body() {
-        let r = HttpResponse::read(reqwest_response("{\"a\":1}"), Some(7)).await.unwrap();
+        let r = HttpResponse::read(reqwest_response("{\"a\":1}"), Some(7))
+            .await
+            .unwrap();
         assert_eq!(r.body(), b"{\"a\":1}");
-        let r = HttpResponse::read(reqwest_response("{\"a\":1}"), None).await.unwrap();
+        let r = HttpResponse::read(reqwest_response("{\"a\":1}"), None)
+            .await
+            .unwrap();
         assert_eq!(r.body().len(), 7);
     }
 
     #[tokio::test]
     async fn test_read_above_the_limit_fails_naming_it() {
-        let err = HttpResponse::read(reqwest_response("{\"a\":12}"), Some(7)).await.unwrap_err();
+        let err = HttpResponse::read(reqwest_response("{\"a\":12}"), Some(7))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("limit of 7 bytes"), "{err}");
     }
 

@@ -97,7 +97,7 @@ pub use client::HttpClient;
 mod request;
 pub use request::{HttpRequest, HttpRequestBody};
 mod response;
-pub use response::HttpResponse;
+pub use response::{HttpResponse, ResponseInspector};
 mod endpoint;
 mod types;
 
