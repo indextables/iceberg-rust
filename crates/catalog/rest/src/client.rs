@@ -40,6 +40,9 @@ pub struct HttpClient {
     extra_headers: HeaderMap,
     /// Whether to disable header redaction in error logs (defaults to false for security).
     disable_header_redaction: bool,
+    /// The most bytes a response body may hold (`rest.response-max-bytes`); a longer body fails
+    /// before it is buffered beyond this many bytes.
+    response_max_bytes: Option<u64>,
 }
 
 impl Debug for HttpClient {
@@ -86,7 +89,7 @@ impl HttpClient {
         );
 
         let response = self.client.execute(request.into_inner()).await?;
-        HttpResponse::read(response).await
+        HttpResponse::read(response, self.response_max_bytes).await
     }
 
     /// Create a new http client.
@@ -95,6 +98,7 @@ impl HttpClient {
             client: cfg.client(),
             extra_headers: cfg.extra_headers()?,
             disable_header_redaction: cfg.disable_header_redaction(),
+            response_max_bytes: cfg.response_max_bytes()?,
         })
     }
 
@@ -112,6 +116,7 @@ impl HttpClient {
             client: cfg.client(),
             extra_headers,
             disable_header_redaction: cfg.disable_header_redaction(),
+            response_max_bytes: cfg.response_max_bytes()?,
         })
     }
 
@@ -157,7 +162,7 @@ impl HttpClient {
 
         let mut request = request.into_inner();
         request.headers_mut().extend(self.extra_headers.clone());
-        HttpResponse::read(self.client.execute(request).await?).await
+        HttpResponse::read(self.client.execute(request).await?, self.response_max_bytes).await
     }
 
     /// Returns whether header redaction is disabled for this client.

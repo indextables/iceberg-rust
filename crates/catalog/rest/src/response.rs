@@ -54,21 +54,50 @@ impl Debug for HttpResponse {
 }
 
 impl HttpResponse {
-    /// Reads `response` into memory.
-    pub(crate) async fn read(response: Response) -> Result<Self> {
+    /// Reads `response` into memory, failing before buffering more than
+    /// `max_bytes` of its body when a limit is given.
+    pub(crate) async fn read(mut response: Response, max_bytes: Option<u64>) -> Result<Self> {
         let status = response.status();
         let headers = response.headers().clone();
-        // `bytes()` builds its error without a URL, so keep the one the
-        // response came from.
+        // `bytes()` and `chunk()` build their errors without a URL, so keep
+        // the one the response came from.
         let url = response.url().clone();
+        let too_long = |limit: u64| {
+            iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                format!("The rest catalog response body exceeds the limit of {limit} bytes"),
+            )
+            .with_context("status", status.to_string())
+        };
+        let Some(limit) = max_bytes else {
+            return Ok(Self {
+                status,
+                headers,
+                body: response
+                    .bytes()
+                    .await
+                    .map_err(|err| err.with_url(url))?
+                    .to_vec(),
+            });
+        };
+        if response.content_length().is_some_and(|len| len > limit) {
+            return Err(too_long(limit));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|err| err.with_url(url.clone()))?
+        {
+            if body.len() as u64 + chunk.len() as u64 > limit {
+                return Err(too_long(limit));
+            }
+            body.extend_from_slice(&chunk);
+        }
         Ok(Self {
             status,
             headers,
-            body: response
-                .bytes()
-                .await
-                .map_err(|err| err.with_url(url))?
-                .to_vec(),
+            body,
         })
     }
 
@@ -100,6 +129,24 @@ impl HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reqwest_response(body: &'static str) -> Response {
+        Response::from(http::Response::builder().status(200).body(body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_read_within_the_limit_keeps_the_body() {
+        let r = HttpResponse::read(reqwest_response("{\"a\":1}"), Some(7)).await.unwrap();
+        assert_eq!(r.body(), b"{\"a\":1}");
+        let r = HttpResponse::read(reqwest_response("{\"a\":1}"), None).await.unwrap();
+        assert_eq!(r.body().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_read_above_the_limit_fails_naming_it() {
+        let err = HttpResponse::read(reqwest_response("{\"a\":12}"), Some(7)).await.unwrap_err();
+        assert!(err.to_string().contains("limit of 7 bytes"), "{err}");
+    }
 
     #[test]
     fn test_debug_holds_back_secrets() {

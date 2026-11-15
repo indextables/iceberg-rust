@@ -69,6 +69,9 @@ pub const REST_CATALOG_PROP_PAGE_SIZE: &str = "rest-page-size";
 /// Disable header redaction in error logs and `Debug` output (defaults to
 /// false for security)
 pub const REST_CATALOG_PROP_DISABLE_HEADER_REDACTION: &str = "disable-header-redaction";
+/// The most bytes a catalog response body may hold; a longer body fails before
+/// it is buffered beyond the limit. Unlimited when absent.
+pub const REST_CATALOG_PROP_RESPONSE_MAX_BYTES: &str = "rest.response-max-bytes";
 /// Authentication scheme: `none` or `oauth2`. When unset, `oauth2` is used
 /// if a `token`, `credential` or `oauth2-server-uri` is configured, `none`
 /// otherwise.
@@ -353,6 +356,20 @@ impl RestCatalogConfig {
     ///
     /// Returns true if the `disable-header-redaction` property is set to "true".
     /// Defaults to false for security (headers are redacted by default).
+    pub(crate) fn response_max_bytes(&self) -> Result<Option<u64>> {
+        self.props
+            .get(REST_CATALOG_PROP_RESPONSE_MAX_BYTES)
+            .map(|v| {
+                v.trim().parse::<u64>().map_err(|_| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!("`{REST_CATALOG_PROP_RESPONSE_MAX_BYTES}` must be a byte count"),
+                    )
+                })
+            })
+            .transpose()
+    }
+
     pub(crate) fn disable_header_redaction(&self) -> bool {
         self.props
             .get(REST_CATALOG_PROP_DISABLE_HEADER_REDACTION)
